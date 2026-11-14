@@ -1,6 +1,4 @@
-
-      - name: Unpack and verify Noor V9 project
-        run: |
+ - name: Unpack and verify Noor V9 project  run: |
           set -euo pipefail
 
           echo "Checking ZIP file..."

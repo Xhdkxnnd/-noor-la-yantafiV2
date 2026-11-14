@@ -1,0 +1,134 @@
+
+name: Build Noor V10 APK - Unified Green System Bars
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools"
+
+      - name: Install Android SDK 36 and rendering tools
+        run: |
+          set -euo pipefail
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          sudo apt-get update
+          sudo apt-get install -y inkscape imagemagick python3
+
+      - name: Unpack and verify Noor V10 project
+        run: |
+          set -euo pipefail
+
+          echo "Checking ZIP file..."
+          ls -lah
+          test -f Noor_V10_Fixed.zip
+
+          unzip -t Noor_V10_Fixed.zip
+
+          mkdir -p source
+          unzip -q Noor_V10_Fixed.zip -d source
+
+          echo "Searching project files..."
+          find source -type f \
+            \( -name "settings.gradle.kts" \
+            -o -name "build.gradle.kts" \
+            -o -name "MainActivity.kt" \
+            -o -name "render_mushaf.py" \) \
+            -print
+
+          PROJECT_FILE=$(find source -type f \
+            -path '*/app/build.gradle.kts' -print -quit)
+
+          if [ -z "$PROJECT_FILE" ]; then
+            echo "ERROR: app/build.gradle.kts not found"
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$(dirname "$PROJECT_FILE")")
+
+          echo "PROJECT_DIR=$PROJECT_DIR"
+
+          for FILE in \
+            "$PROJECT_DIR/settings.gradle.kts" \
+            "$PROJECT_DIR/app/src/main/java/org/noorlayantafi/app/MainActivity.kt" \
+            "$PROJECT_DIR/scripts/render_mushaf.py"
+          do
+            if [ ! -f "$FILE" ]; then
+              echo "ERROR: Missing file: $FILE"
+              exit 1
+            fi
+            echo "FOUND: $FILE"
+          done
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Project extraction and verification successful."
+
+      - name: Download Mushaf vector source
+        run: |
+          set -euo pipefail
+
+          git clone --depth 1 \
+            https://github.com/MushafAlMadinahVector/MushafAlMadinahVector.git \
+            "$RUNNER_TEMP/mushaf-source"
+
+      - name: Render first three Mushaf pages
+        run: |
+          set -euo pipefail
+
+          python3 "$PROJECT_DIR/scripts/render_mushaf.py" \
+            "$RUNNER_TEMP/mushaf-source/quran-pages" \
+            "$PROJECT_DIR/app/src/main/assets/mushaf-pages"
+
+      - name: Build Noor V10 APK
+        run: |
+          set -euo pipefail
+
+          gradle --no-daemon \
+            -p "$PROJECT_DIR" \
+            :app:assembleDebug
+
+      - name: Verify APK exists
+        run: |
+          set -euo pipefail
+
+          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -s "$APK" ]; then
+            echo "ERROR: APK was not generated."
+            exit 1
+          fi
+
+          echo "APK successfully generated:"
+          ls -lh "$APK"
+
+      - name: Upload Noor V10 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: noor-la-yantafi-v10-3-pages-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14

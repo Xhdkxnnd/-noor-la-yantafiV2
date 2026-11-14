@@ -1,0 +1,90 @@
+
+name: Build Noor V9 APK - Stable System Bars
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools"
+
+      - name: Install Android SDK 36 and tools
+        run: |
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          sudo apt-get update
+          sudo apt-get install -y inkscape imagemagick
+
+      - name: Unpack Noor V9 project
+        run: |
+          set -euo pipefail
+          test -f Noor_V9_Project.zip
+          mkdir -p source
+          unzip -q Noor_V9_Project.zip -d source
+
+          PROJECT_FILE=$(find source -type f \
+            -path '*/app/build.gradle.kts' -print -quit)
+
+          test -n "$PROJECT_FILE"
+
+          PROJECT_DIR=$(dirname "$(dirname "$PROJECT_FILE")")
+
+          test -f "$PROJECT_DIR/settings.gradle.kts"
+          test -f "$PROJECT_DIR/app/src/main/java/org/noorlayantafi/app/MainActivity.kt"
+          test -f "$PROJECT_DIR/scripts/render_mushaf.py"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Download Hafs vector source
+        run: |
+          git clone --depth 1 \
+            https://github.com/MushafAlMadinahVector/MushafAlMadinahVector.git \
+            "$RUNNER_TEMP/mushaf-source"
+
+      - name: Render first three Mushaf pages
+        run: |
+          python3 "$PROJECT_DIR/scripts/render_mushaf.py" \
+            "$RUNNER_TEMP/mushaf-source/quran-pages" \
+            "$PROJECT_DIR/app/src/main/assets/mushaf-pages"
+
+      - name: Build Noor V9 APK
+        run: |
+          gradle --no-daemon \
+            -p "$PROJECT_DIR" \
+            :app:assembleDebug
+
+      - name: Verify APK exists
+        run: |
+          test -s "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          ls -lh "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+
+      - name: Upload Noor V9 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: noor-la-yantafi-v9-3-pages-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14

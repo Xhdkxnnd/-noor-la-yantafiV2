@@ -1,0 +1,125 @@
+name: Build Noor V1 APK - Full 604 Page Mushaf
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools"
+
+      - name: Install Android SDK 36 and rendering tools
+        run: |
+          set -euo pipefail
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          sudo apt-get update
+          sudo apt-get install -y inkscape imagemagick python3
+
+      - name: Unpack and verify Noor V1 project
+        run: |
+          set -euo pipefail
+          test -f Noor_V1_Full_Mushaf.zip
+          unzip -t Noor_V1_Full_Mushaf.zip
+          mkdir -p source
+          unzip -q Noor_V1_Full_Mushaf.zip -d source
+
+          PROJECT_FILE=$(find source -type f -path '*/app/build.gradle.kts' -print -quit)
+          test -n "$PROJECT_FILE"
+          PROJECT_DIR=$(dirname "$(dirname "$PROJECT_FILE")")
+
+          for FILE in \
+            "$PROJECT_DIR/settings.gradle.kts" \
+            "$PROJECT_DIR/app/src/main/java/org/noorlayantafi/app/MainActivity.kt" \
+            "$PROJECT_DIR/scripts/render_mushaf.py" \
+            "$PROJECT_DIR/scripts/generate_surah_pages.py"
+          do
+            test -f "$FILE" || { echo "Missing project file: $FILE"; exit 1; }
+            echo "FOUND: $FILE"
+          done
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Project extraction and verification successful."
+
+      - name: Download official Hafs vector Mushaf
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --retry-delay 5 \
+            https://dm.qurancomplex.gov.sa/Download/ai-hafs.zip \
+            --output "$RUNNER_TEMP/ai-hafs.zip"
+
+          echo "280C5D71CA16AAEEB3A343BE1B92C76FA6DF71D0671E202C026FDE12402D9EEF  $RUNNER_TEMP/ai-hafs.zip" | sha256sum --check
+
+          mkdir -p "$RUNNER_TEMP/ai-hafs"
+          unzip -q "$RUNNER_TEMP/ai-hafs.zip" -d "$RUNNER_TEMP/ai-hafs"
+
+      - name: Render and verify all 604 Mushaf pages
+        run: |
+          set -euo pipefail
+          python3 "$PROJECT_DIR/scripts/render_mushaf.py" \
+            "$RUNNER_TEMP/ai-hafs" \
+            "$PROJECT_DIR/app/src/main/assets/mushaf-pages"
+
+          COUNT=$(find "$PROJECT_DIR/app/src/main/assets/mushaf-pages" -maxdepth 1 -type f -name '*.jpg' | wc -l)
+          test "$COUNT" -eq 604
+          echo "Verified $COUNT Mushaf page images."
+
+      - name: Download and generate surah page index
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --retry-delay 3 \
+            https://raw.githubusercontent.com/ouryhamdalaye/madinah-mushaf-json/main/pages/meta.json \
+            --output "$RUNNER_TEMP/surah-meta.json"
+
+          python3 "$PROJECT_DIR/scripts/generate_surah_pages.py" \
+            "$RUNNER_TEMP/surah-meta.json" \
+            "$PROJECT_DIR/app/src/main/java/org/noorlayantafi/app/SurahPages.kt"
+
+          test -s "$PROJECT_DIR/app/src/main/java/org/noorlayantafi/app/SurahPages.kt"
+
+      - name: Build Noor V1 APK
+        run: |
+          set -euo pipefail
+          gradle --no-daemon -p "$PROJECT_DIR" :app:assembleDebug
+
+      - name: Verify APK and full Mushaf assets
+        run: |
+          set -euo pipefail
+          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+
+          COUNT=$(find "$PROJECT_DIR/app/src/main/assets/mushaf-pages" -maxdepth 1 -type f -name '*.jpg' | wc -l)
+          test "$COUNT" -eq 604
+
+          echo "BUILD SUCCESSFUL - APK generated with all $COUNT Mushaf pages."
+          ls -lh "$APK"
+
+      - name: Upload Noor V1 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: noor-la-yantafi-v1-full-604-pages-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14

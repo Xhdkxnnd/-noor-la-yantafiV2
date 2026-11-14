@@ -1,3 +1,4 @@
+
 name: Build Noor V1 APK - Full 604 Page Mushaf
 
 on:
@@ -34,21 +35,32 @@ jobs:
       - name: Install Android SDK 36 and rendering tools
         run: |
           set -euo pipefail
+
           sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
           sudo apt-get update
           sudo apt-get install -y inkscape imagemagick python3
 
       - name: Unpack and verify Noor V1 project
         run: |
           set -euo pipefail
+
+          echo "Checking project ZIP..."
+
           test -f Noor_V1_Full_Mushaf.zip
           unzip -t Noor_V1_Full_Mushaf.zip
+
           mkdir -p source
           unzip -q Noor_V1_Full_Mushaf.zip -d source
 
-          PROJECT_FILE=$(find source -type f -path '*/app/build.gradle.kts' -print -quit)
+          PROJECT_FILE=$(find source -type f \
+            -path '*/app/build.gradle.kts' -print -quit)
+
           test -n "$PROJECT_FILE"
+
           PROJECT_DIR=$(dirname "$(dirname "$PROJECT_FILE")")
+
+          echo "PROJECT_DIR=$PROJECT_DIR"
 
           for FILE in \
             "$PROJECT_DIR/settings.gradle.kts" \
@@ -56,65 +68,229 @@ jobs:
             "$PROJECT_DIR/scripts/render_mushaf.py" \
             "$PROJECT_DIR/scripts/generate_surah_pages.py"
           do
-            test -f "$FILE" || { echo "Missing project file: $FILE"; exit 1; }
+            if [ ! -f "$FILE" ]; then
+              echo "ERROR: Missing project file: $FILE"
+              exit 1
+            fi
+
             echo "FOUND: $FILE"
           done
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Project extraction and verification successful."
 
-      - name: Download official Hafs vector Mushaf
+          echo "Project extraction successful."
+
+      - name: Download pinned Hafs vector Mushaf
         run: |
           set -euo pipefail
-          curl --fail --location --retry 3 --retry-delay 5 \
-            https://dm.qurancomplex.gov.sa/Download/ai-hafs.zip \
-            --output "$RUNNER_TEMP/ai-hafs.zip"
 
-          echo "280C5D71CA16AAEEB3A343BE1B92C76FA6DF71D0671E202C026FDE12402D9EEF  $RUNNER_TEMP/ai-hafs.zip" | sha256sum --check
+          REPO="$RUNNER_TEMP/mushaf-source"
 
-          mkdir -p "$RUNNER_TEMP/ai-hafs"
-          unzip -q "$RUNNER_TEMP/ai-hafs.zip" -d "$RUNNER_TEMP/ai-hafs"
+          git clone --depth 1 \
+            --branch main \
+            https://github.com/MushafAlMadinahVector/MushafAlMadinahVector.git \
+            "$REPO"
 
-      - name: Render and verify all 604 Mushaf pages
+          EXPECTED_COMMIT="a6f52f8b05fa28cdffb637cbbab0ed30515bbeb2"
+
+          ACTUAL_COMMIT=$(git -C "$REPO" rev-parse HEAD)
+
+          if [ "$ACTUAL_COMMIT" != "$EXPECTED_COMMIT" ]; then
+            echo "ERROR: Unexpected Mushaf source version."
+            echo "Expected: $EXPECTED_COMMIT"
+            echo "Actual: $ACTUAL_COMMIT"
+            exit 1
+          fi
+
+          SOURCE_DIR="$REPO/quran-pages"
+
+          test -d "$SOURCE_DIR"
+
+          python3 - "$SOURCE_DIR" <<'PY'
+          import sys
+          from pathlib import Path
+
+          source = Path(sys.argv[1])
+
+          expected = [
+              f"{i:03d}___Hafs39__DM.ai"
+              for i in range(1, 605)
+          ]
+
+          actual = sorted(p.name for p in source.glob("*.ai"))
+
+          if actual != expected:
+              missing = sorted(set(expected) - set(actual))
+              extra = sorted(set(actual) - set(expected))
+
+              print("ERROR: Mushaf source verification failed.")
+              print("Expected pages: 604")
+              print("Actual pages:", len(actual))
+              print("Missing:", missing[:20])
+              print("Extra:", extra[:20])
+
+              sys.exit(1)
+
+          print("Verified all 604 official vector page files.")
+          print("Pages 001, 002 and 003 are present.")
+          PY
+
+      - name: Render all 604 Mushaf pages
         run: |
           set -euo pipefail
+
+          SOURCE_DIR="$RUNNER_TEMP/mushaf-source/quran-pages"
+
+          ASSET_DIR="$PROJECT_DIR/app/src/main/assets/mushaf-pages"
+
+          mkdir -p "$ASSET_DIR"
+
+          rm -f "$ASSET_DIR"/*.jpg
+
           python3 "$PROJECT_DIR/scripts/render_mushaf.py" \
-            "$RUNNER_TEMP/ai-hafs" \
-            "$PROJECT_DIR/app/src/main/assets/mushaf-pages"
+            "$SOURCE_DIR" \
+            "$ASSET_DIR"
 
-          COUNT=$(find "$PROJECT_DIR/app/src/main/assets/mushaf-pages" -maxdepth 1 -type f -name '*.jpg' | wc -l)
-          test "$COUNT" -eq 604
-          echo "Verified $COUNT Mushaf page images."
+          python3 - "$ASSET_DIR" <<'PY'
+          import sys
+          from pathlib import Path
 
-      - name: Download and generate surah page index
+          folder = Path(sys.argv[1])
+
+          expected = [
+              f"{i:03d}.jpg"
+              for i in range(1, 605)
+          ]
+
+          actual = sorted(p.name for p in folder.glob("*.jpg"))
+
+          if actual != expected:
+              missing = sorted(set(expected) - set(actual))
+
+              print("ERROR: Rendered pages are incomplete.")
+              print("Expected: 604")
+              print("Actual:", len(actual))
+              print("Missing:", missing[:20])
+
+              sys.exit(1)
+
+          for name in expected:
+              file = folder / name
+
+              if not file.is_file() or file.stat().st_size == 0:
+                  print("ERROR: Invalid page:", name)
+                  sys.exit(1)
+
+          print("SUCCESS: All 604 pages rendered.")
+          print("First three pages verified.")
+          print("Last page 604 verified.")
+          PY
+
+          identify -regard-warnings "$ASSET_DIR"/*.jpg >/dev/null
+
+          echo "All rendered images passed image validation."
+
+      - name: Download and verify Surah index
         run: |
           set -euo pipefail
-          curl --fail --location --retry 3 --retry-delay 3 \
-            https://raw.githubusercontent.com/ouryhamdalaye/madinah-mushaf-json/main/pages/meta.json \
-            --output "$RUNNER_TEMP/surah-meta.json"
+
+          META="$RUNNER_TEMP/surah-meta.json"
+
+          curl --fail --location \
+            --retry 5 \
+            --retry-all-errors \
+            --retry-delay 3 \
+            "https://raw.githubusercontent.com/ouryhamdalaye/madinah-mushaf-json/507eada48f3ffe26a600acf5792a18ba86d6851e/pages/meta.json" \
+            --output "$META"
+
+          python3 - "$META" <<'PY'
+          import sys
+          import json
+
+          with open(sys.argv[1], encoding="utf-8") as f:
+              data = json.load(f)
+
+          if len(data) != 114:
+              raise SystemExit(
+                  f"ERROR: Expected 114 surahs, found {len(data)}"
+              )
+
+          for i, surah in enumerate(data, 1):
+              if surah.get("id") != i:
+                  raise SystemExit(
+                      f"ERROR: Invalid surah sequence at {i}"
+                  )
+
+              page = surah.get("start_page")
+
+              if not isinstance(page, int) or not 1 <= page <= 604:
+                  raise SystemExit(
+                      f"ERROR: Invalid start page for surah {i}"
+                  )
+
+          print("Verified all 114 surahs.")
+          PY
 
           python3 "$PROJECT_DIR/scripts/generate_surah_pages.py" \
-            "$RUNNER_TEMP/surah-meta.json" \
+            "$META" \
             "$PROJECT_DIR/app/src/main/java/org/noorlayantafi/app/SurahPages.kt"
 
           test -s "$PROJECT_DIR/app/src/main/java/org/noorlayantafi/app/SurahPages.kt"
 
+          echo "Surah index generated successfully."
+
       - name: Build Noor V1 APK
         run: |
           set -euo pipefail
-          gradle --no-daemon -p "$PROJECT_DIR" :app:assembleDebug
 
-      - name: Verify APK and full Mushaf assets
+          gradle --no-daemon \
+            -p "$PROJECT_DIR" \
+            :app:assembleDebug
+
+      - name: Verify APK and all 604 packaged pages
         run: |
           set -euo pipefail
+
           APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
-          test -s "$APK"
 
-          COUNT=$(find "$PROJECT_DIR/app/src/main/assets/mushaf-pages" -maxdepth 1 -type f -name '*.jpg' | wc -l)
-          test "$COUNT" -eq 604
+          if [ ! -s "$APK" ]; then
+            echo "ERROR: APK was not generated."
+            exit 1
+          fi
 
-          echo "BUILD SUCCESSFUL - APK generated with all $COUNT Mushaf pages."
+          python3 - "$APK" <<'PY'
+          import sys
+          import zipfile
+
+          apk = sys.argv[1]
+
+          with zipfile.ZipFile(apk, "r") as z:
+              if z.testzip() is not None:
+                  raise SystemExit("ERROR: APK ZIP integrity failure.")
+
+              names = set(z.namelist())
+
+              expected = [
+                  f"assets/mushaf-pages/{i:03d}.jpg"
+                  for i in range(1, 605)
+              ]
+
+              missing = [name for name in expected if name not in names]
+
+              if missing:
+                  print("ERROR: Missing packaged Mushaf pages:")
+                  print(missing[:20])
+                  sys.exit(1)
+
+              print("Verified all 604 pages inside APK.")
+              print("APK archive integrity verified.")
+          PY
+
+          echo "BUILD SUCCESSFUL"
+
           ls -lh "$APK"
+
+          sha256sum "$APK"
 
       - name: Upload Noor V1 APK
         uses: actions/upload-artifact@v4
